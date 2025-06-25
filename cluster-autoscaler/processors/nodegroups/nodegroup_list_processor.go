@@ -18,9 +18,11 @@ package nodegroups
 
 import (
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	ca_context "k8s.io/autoscaler/cluster-autoscaler/context"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
+	"k8s.io/autoscaler/cluster-autoscaler/utils/labels"
 )
 
 // NodeGroupListProcessor processes lists of NodeGroups considered in scale-up.
@@ -37,7 +39,7 @@ type NoOpNodeGroupListProcessor struct {
 
 // NewDefaultNodeGroupListProcessor creates an instance of NodeGroupListProcessor.
 func NewDefaultNodeGroupListProcessor() NodeGroupListProcessor {
-	return &NoOpNodeGroupListProcessor{}
+	return &AutoprovisioningNodeGroupListProcessor{}
 }
 
 // Process processes lists of unschedulable and scheduled pods before scaling of the cluster.
@@ -48,4 +50,36 @@ func (p *NoOpNodeGroupListProcessor) Process(autoscalingCtx *ca_context.Autoscal
 
 // CleanUp cleans up the processor's internal structures.
 func (p *NoOpNodeGroupListProcessor) CleanUp() {
+}
+
+type AutoprovisioningNodeGroupListProcessor struct {
+}
+
+// Process processes lists of unschedulable and scheduled pods before scaling of the cluster.
+// Process extends the list of node groups
+func (p *AutoprovisioningNodeGroupListProcessor) Process(autoscalingCtx *ca_context.AutoscalingContext, nodeGroups []cloudprovider.NodeGroup, nodeInfos map[string]*framework.NodeInfo,
+	unschedulablePods []*apiv1.Pod,
+) ([]cloudprovider.NodeGroup, map[string]*framework.NodeInfo, error) {
+	machines, err := autoscalingCtx.CloudProvider.GetAvailableMachineTypes()
+	if err != nil {
+		return nil, nil, err
+	}
+	bestLabels := labels.BestLabelSet(unschedulablePods)
+	for _, machineType := range machines {
+		nodeGroup, err := autoscalingCtx.CloudProvider.NewNodeGroup(machineType, bestLabels, map[string]string{}, []apiv1.Taint{}, map[string]resource.Quantity{})
+		if err != nil {
+			return nil, nil, err
+		}
+		nodeInfo, err := nodeGroup.TemplateNodeInfo()
+		if err != nil {
+			return nil, nil, err
+		}
+		nodeInfos[nodeGroup.Id()] = nodeInfo
+		nodeGroups = append(nodeGroups, nodeGroup)
+	}
+	return nodeGroups, nodeInfos, nil
+}
+
+// CleanUp cleans up the processor's internal structures.
+func (p *AutoprovisioningNodeGroupListProcessor) CleanUp() {
 }

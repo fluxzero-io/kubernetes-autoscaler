@@ -1,0 +1,17 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="go build k8s.io/autoscaler/cluster-autoscaler" type="GoApplicationRunConfiguration" factoryName="Go Application" nameIsGenerated="true">
+    <module name="cluster-autoscaler" />
+    <working_directory value="$PROJECT_DIR$" />
+    <parameters value="--cloud-provider=exoscale --stderrthreshold=info --cordon-node-before-terminating --v=5 --kubeconfig=$USER_HOME$/.kube/config" />
+    <envs>
+      <env name="EXOSCALE_API_KEY" value="EXO549c73b5feb89224e40d313b" />
+      <env name="EXOSCALE_API_SECRET" value="DO NOT COMMIT" />
+      <env name="EXOSCALE_ZONE" value="at-vie-2" />
+    </envs>
+    <kind value="DIRECTORY" />
+    <package value="k8s.io/autoscaler/cluster-autoscaler" />
+    <directory value="$PROJECT_DIR$" />
+    <filePath value="$PROJECT_DIR$/../cluster-autoscaler|$PROJECT_DIR$/main.go" />
+    <method v="2" />
+  </configuration>
+</component>
