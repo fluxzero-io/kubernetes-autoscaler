@@ -19,6 +19,9 @@ package exoscale
 import (
 	"context"
 	"fmt"
+	resourceapi "k8s.io/api/resource/v1beta1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sync"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -28,9 +31,31 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 )
 
+type machineType struct {
+	family string
+	size   string
+	cpu    string
+	memory string
+}
+
 const (
-	scaleToZeroSupported = false
+	scaleToZeroSupported = true
+
+	applicationSizeLabelKey = "flux.host.application.size"
+	clusterSizeLabelKey     = "flux.host.cluster.size"
+	clusterIdLabelKey       = "flux.host.cluster.id"
+	scopeLabelKey           = "flux.host.node.scope"
 )
+
+var machineTypes = map[string]machineType{
+	"tiny":   {"standard", "small", "2", "2Gi"},
+	"xsmall": {"standard", "medium", "2", "4Gi"},
+	"small":  {"standard", "large", "4", "8Gi"},
+	"medium": {"cpu", "extra-large", "8", "16Gi"},
+	"large":  {"cpu", "huge", "16", "32Gi"},
+	"xlarge": {"cpu", "mega", "32", "64Gi"},
+	"huge":   {"cpu", "titan", "40", "128Gi"},
+}
 
 // sksNodepoolNodeGroup implements cloudprovider.NodeGroup interface for Exoscale SKS Nodepools.
 type sksNodepoolNodeGroup struct {
@@ -43,6 +68,8 @@ type sksNodepoolNodeGroup struct {
 
 	minSize int
 	maxSize int
+
+	machineType string
 }
 
 // MaxSize returns maximum size of the node group.
@@ -60,6 +87,9 @@ func (n *sksNodepoolNodeGroup) MinSize() int {
 // to Size() once everything stabilizes (new nodes finish startup and registration or
 // removed nodes are deleted completely). Implementation required.
 func (n *sksNodepoolNodeGroup) TargetSize() (int, error) {
+	if n.sksNodepool == nil {
+		return 0, nil
+	}
 	return int(*n.sksNodepool.Size), nil
 }
 
@@ -69,6 +99,19 @@ func (n *sksNodepoolNodeGroup) TargetSize() (int, error) {
 func (n *sksNodepoolNodeGroup) IncreaseSize(delta int) error {
 	if delta <= 0 {
 		return fmt.Errorf("delta must be positive, have: %d", delta)
+	}
+
+	if n.sksNodepool == nil {
+		debugf("Creating SKS Nodepool to scale from 0 to 1 nodes")
+		_, err := n.Create()
+		if err != nil {
+			return err
+		}
+		if delta > 1 {
+			delta--
+		} else {
+			return nil
+		}
 	}
 
 	targetSize := *n.sksNodepool.Size + int64(delta)
@@ -115,6 +158,16 @@ func (n *sksNodepoolNodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 		instanceIDs[i] = toNodeID(node.Spec.ProviderID)
 	}
 
+	if n.sksNodepool != nil && *n.sksNodepool.Size == 1 {
+		debugf("Deleting SKS Nodepool %s to delete last instance: %v", *n.sksNodepool.ID, instanceIDs)
+		err := n.m.client.DeleteSKSNodepool(n.m.ctx, n.m.zone, n.sksCluster, n.sksNodepool)
+		if err != nil {
+			return err
+		}
+		n.sksNodepool = nil
+		return nil
+	}
+
 	infof("evicting SKS Nodepool %s members: %v", *n.sksNodepool.ID, instanceIDs)
 
 	if err := n.m.client.EvictSKSNodepoolMembers(
@@ -156,7 +209,11 @@ func (n *sksNodepoolNodeGroup) DecreaseTargetSize(_ int) error {
 
 // Id returns an unique identifier of the node group.
 func (n *sksNodepoolNodeGroup) Id() string {
-	return *n.sksNodepool.InstancePoolID
+	if n.sksNodepool == nil {
+		return n.machineType
+	} else {
+		return *n.sksNodepool.InstancePoolID
+	}
 }
 
 // Debug returns a string containing all information regarding this node group.
@@ -179,6 +236,10 @@ func (n *sksNodepoolNodeGroup) Nodes() ([]cloudprovider.Instance, error) {
 		return nil, err
 	}
 
+	if instancePool.InstanceIDs == nil {
+		return make([]cloudprovider.Instance, 0), nil
+	}
+
 	nodes := make([]cloudprovider.Instance, len(*instancePool.InstanceIDs))
 	for i, id := range *instancePool.InstanceIDs {
 		instance, err := n.m.client.GetInstance(n.m.ctx, n.m.zone, id)
@@ -199,7 +260,45 @@ func (n *sksNodepoolNodeGroup) Nodes() ([]cloudprovider.Instance, error) {
 // capacity and allocatable information as well as all pods that are started on
 // the node by default, using manifest (most likely only kube-proxy). Implementation optional.
 func (n *sksNodepoolNodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
-	return nil, cloudprovider.ErrNotImplemented
+	mtype := machineTypes[n.machineType]
+
+	scope := (*n.sksCluster.Labels)[scopeLabelKey]
+
+	capacity := apiv1.ResourceList{
+		apiv1.ResourceCPU:    resource.MustParse(mtype.cpu),
+		apiv1.ResourceMemory: resource.MustParse(mtype.memory),
+		apiv1.ResourcePods:   resource.MustParse("110"),
+	}
+
+	node := &apiv1.Node{
+		ObjectMeta: v1.ObjectMeta{
+			Name:   scope + "-" + n.machineType,
+			Labels: createLabels(scope, n.machineType),
+		},
+		Status: apiv1.NodeStatus{
+			Capacity:    capacity,
+			Allocatable: capacity,
+		},
+	}
+
+	nodeInfo := framework.NewNodeInfo(node, make([]*resourceapi.ResourceSlice, 0))
+	nodeInfo.SetNode(node)
+
+	return nodeInfo, nil
+}
+
+func createLabels(scope string, machineType string) map[string]string {
+	var sizeLabelKey string
+	if scope == "flux-platform" {
+		sizeLabelKey = clusterSizeLabelKey
+	} else {
+		sizeLabelKey = applicationSizeLabelKey
+	}
+
+	return map[string]string{
+		scopeLabelKey: scope,
+		sizeLabelKey:  machineType,
+	}
 }
 
 // Exist checks if the node group really exists on the cloud provider side. Allows to tell the
@@ -210,8 +309,92 @@ func (n *sksNodepoolNodeGroup) Exist() bool {
 
 // Create creates the node group on the cloud provider side. Implementation optional.
 func (n *sksNodepoolNodeGroup) Create() (cloudprovider.NodeGroup, error) {
-	return nil, cloudprovider.ErrNotImplemented
+	instanceTypeID, err := n.selectMatchingInstanceType()
+	if err != nil {
+		return nil, err
+	}
+
+	securityGroupIDs, err := n.getSecurityGroupIDs()
+	if err != nil {
+		return nil, err
+	}
+
+	clusterId := (*n.sksCluster.Labels)[clusterIdLabelKey]
+
+	scope := (*n.sksCluster.Labels)[scopeLabelKey]
+	var instancePrefix string
+	if scope == "flux-platform" {
+		instancePrefix = "fp"
+	} else {
+		instancePrefix = "c"
+	}
+
+	_, err = n.m.client.CreateSKSNodepool(n.m.ctx, n.m.zone, n.sksCluster, &egoscale.SKSNodepool{
+		Description:      ptr("Autoprovisioned Node Pool for " + scope),
+		DiskSize:         ptr(int64(20)),
+		InstancePrefix:   &instancePrefix,
+		InstanceTypeID:   instanceTypeID,
+		Labels:           ptr(createLabels(scope, n.machineType)),
+		Name:             ptr("np_" + instancePrefix + "_" + clusterId + "_" + n.machineType + "-" + n.m.zone),
+		SecurityGroupIDs: securityGroupIDs,
+		Size:             ptr(int64(1)),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return n, nil
 }
+
+// selectMatchingInstanceType fetches all instance types and returns the ID of the one
+// that matches the machineType format "Family_Size"
+func (n *sksNodepoolNodeGroup) selectMatchingInstanceType() (*string, error) {
+	instanceTypes, err := n.m.client.ListInstanceTypes(n.m.ctx, n.m.zone)
+	if err != nil {
+		return nil, fmt.Errorf("error listing instance types: %w", err)
+	}
+
+	for _, instanceType := range instanceTypes {
+		machineType := machineTypes[n.machineType]
+		if machineType.family == *instanceType.Family && machineType.size == *instanceType.Size {
+			return instanceType.ID, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no matching instance type found for machineType: %s", n.machineType)
+}
+
+func (n *sksNodepoolNodeGroup) getSecurityGroupIDs() (*[]string, error) {
+	clusterId := (*n.sksCluster.Labels)["flux.host.cluster.id"]
+	zone := n.m.zone
+	securityGroups, err := n.m.client.ListSecurityGroups(n.m.ctx, zone)
+	if err != nil {
+		return nil, err
+	}
+
+	var matchingIDs []string
+
+	for _, sg := range securityGroups {
+		name := *sg.Name
+		for _, prefix := range []string{"sgk8s", "sg"} {
+			expectedName := fmt.Sprintf("%s_%s-%s", prefix, clusterId, zone)
+			if name == expectedName {
+				matchingIDs = append(matchingIDs, *sg.ID)
+			}
+			if len(matchingIDs) == 2 {
+				break
+			}
+		}
+	}
+
+	if len(matchingIDs) == 0 {
+		return nil, fmt.Errorf("no matching security group IDs found for cluster %v and zone %v", clusterId, zone)
+	}
+
+	return &matchingIDs, nil
+}
+
+func ptr[T any](v T) *T { return &v }
 
 // Delete deletes the node group on the cloud provider side.
 // This will be executed only for autoprovisioned node groups, once their size drops to 0.
@@ -229,7 +412,7 @@ func (n *sksNodepoolNodeGroup) Autoprovisioned() bool {
 // GetOptions returns NodeGroupAutoscalingOptions that should be used for this particular
 // sksNodepoolNodeGroup. Returning a nil will result in using default options.
 func (n *sksNodepoolNodeGroup) GetOptions(_ config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
-	return nil, cloudprovider.ErrNotImplemented
+	return nil, nil
 }
 
 func (n *sksNodepoolNodeGroup) waitUntilRunning(ctx context.Context) error {

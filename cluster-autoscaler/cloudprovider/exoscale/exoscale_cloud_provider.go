@@ -118,7 +118,7 @@ func (e *exoscaleCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovide
 			minSize = nodeGroupSpec.MinSize
 			maxSize = nodeGroupSpec.MaxSize
 		} else {
-			minSize = 1
+			minSize = 0
 			maxSize, err = e.manager.computeInstanceQuota()
 			if err != nil {
 				return nil, err
@@ -131,6 +131,7 @@ func (e *exoscaleCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovide
 			m:           e.manager,
 			minSize:     minSize,
 			maxSize:     maxSize,
+			machineType: (*sksNodepool.Labels)[applicationSizeLabelKey],
 		}
 		debugf("found node %s belonging to SKS Nodepool %s", toNodeID(node.Spec.ProviderID), *sksNodepool.ID)
 	} else {
@@ -175,20 +176,35 @@ func (e *exoscaleCloudProvider) Pricing() (cloudprovider.PricingModel, errors.Au
 // GetAvailableMachineTypes get all machine types that can be requested from the cloud provider.
 // Implementation optional.
 func (e *exoscaleCloudProvider) GetAvailableMachineTypes() ([]string, error) {
-	return []string{}, nil
+	return []string{"tiny", "xsmall", "small", "medium", "large", "xlarge", "huge"}, nil
 }
 
 // NewNodeGroup builds a theoretical node group based on the node definition provided. The node group is not automatically
 // created on the cloud provider side. The node group is not returned by NodeGroups() until it is created.
 // Implementation optional.
 func (e *exoscaleCloudProvider) NewNodeGroup(
-	_ string,
-	_,
+	machineType string,
+	_ map[string]string,
 	_ map[string]string,
 	_ []apiv1.Taint,
 	_ map[string]resource.Quantity,
 ) (cloudprovider.NodeGroup, error) {
-	return nil, cloudprovider.ErrNotImplemented
+
+	if len(e.manager.nodeGroups) == 0 {
+		return nil, errors.NewAutoscalerError(errors.TransientError, "Unable to get sks cluster from existing node group")
+	}
+	sksNodeGroup, ok := e.manager.nodeGroups[0].(*sksNodepoolNodeGroup)
+	if !ok {
+		return nil, errors.NewAutoscalerError(errors.InternalError, "Node group is of incorrect type")
+	}
+
+	return &sksNodepoolNodeGroup{
+		m:           e.manager,
+		minSize:     0,
+		maxSize:     100,
+		sksCluster:  sksNodeGroup.sksCluster,
+		machineType: machineType,
+	}, nil
 }
 
 // GetResourceLimiter returns struct containing limits (max, min) for resources (cores, memory etc.).

@@ -17,6 +17,9 @@ limitations under the License.
 package nodegroups
 
 import (
+	"fmt"
+	"k8s.io/autoscaler/cluster-autoscaler/metrics"
+	"k8s.io/klog/v2"
 	"reflect"
 
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
@@ -114,5 +117,80 @@ func (*NoOpNodeGroupManager) CleanUp() {}
 
 // NewDefaultNodeGroupManager creates an instance of NodeGroupManager.
 func NewDefaultNodeGroupManager() NodeGroupManager {
-	return &NoOpNodeGroupManager{}
+	return &AutoprovisioningNodeGroupManager{}
+}
+
+// AutoprovisioningNodeGroupManager is a node group manager that creates and deletes node groups when needed
+type AutoprovisioningNodeGroupManager struct {
+	ExtraGroups int
+}
+
+// CreateNodeGroup creates a new node group
+func (p *AutoprovisioningNodeGroupManager) CreateNodeGroup(context *context.AutoscalingContext, nodeGroup cloudprovider.NodeGroup) (CreateNodeGroupResult, errors.AutoscalerError) {
+	return p.createNodeGroup(context, nodeGroup)
+}
+
+// CreateNodeGroupAsync simulates async node group creation. Returns upcoming node groups, never calls initializer.
+func (p *AutoprovisioningNodeGroupManager) CreateNodeGroupAsync(context *context.AutoscalingContext, nodeGroup cloudprovider.NodeGroup, nodeGroupInitializer AsyncNodeGroupInitializer) (CreateNodeGroupResult, errors.AutoscalerError) {
+	return p.createNodeGroup(context, nodeGroup)
+}
+
+func (p *AutoprovisioningNodeGroupManager) createNodeGroup(context *context.AutoscalingContext, nodeGroup cloudprovider.NodeGroup) (CreateNodeGroupResult, errors.AutoscalerError) {
+	newNodeGroup, err := nodeGroup.Create()
+	if err != nil {
+		return CreateNodeGroupResult{}, errors.ToAutoscalerError(
+			errors.InternalError,
+			fmt.Errorf("failed to create node group: %w", err),
+		)
+	}
+	metrics.RegisterNodeGroupCreation()
+
+	result := CreateNodeGroupResult{
+		MainCreatedNodeGroup: newNodeGroup,
+	}
+	return result, nil
+}
+
+// RemoveUnneededNodeGroups removes unneeded node groups
+func (p *AutoprovisioningNodeGroupManager) RemoveUnneededNodeGroups(context *context.AutoscalingContext) ([]cloudprovider.NodeGroup, error) {
+	removedNodeGroups := make([]cloudprovider.NodeGroup, 0)
+	nodeGroups := context.CloudProvider.NodeGroups()
+
+	for _, nodeGroup := range nodeGroups {
+		if !nodeGroup.Autoprovisioned() {
+			continue
+		}
+
+		targetSize, err := nodeGroup.TargetSize()
+		if err != nil {
+			klog.Errorf("Failed to get target size for node group %q: %v", nodeGroup.Id(), err)
+			continue
+		}
+		if targetSize > 0 {
+			continue
+		}
+
+		nodes, err := nodeGroup.Nodes()
+		if err != nil {
+			klog.Errorf("Failed to get nodes for node group %q: %v", nodeGroup.Id(), err)
+			continue
+		}
+		if len(nodes) > 0 {
+			continue
+		}
+
+		err = nodeGroup.Delete()
+		if err != nil {
+			klog.Errorf("Failed to delete node group %q: %v", nodeGroup.Id(), err)
+			continue
+		}
+
+		removedNodeGroups = append(removedNodeGroups, nodeGroup)
+	}
+
+	return removedNodeGroups, nil
+}
+
+// CleanUp doesn't do anything; it's here to satisfy the interface
+func (p *AutoprovisioningNodeGroupManager) CleanUp() {
 }

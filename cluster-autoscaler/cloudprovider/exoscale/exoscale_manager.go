@@ -33,9 +33,13 @@ type exoscaleClient interface {
 	GetInstance(context.Context, string, string) (*egoscale.Instance, error)
 	GetInstancePool(context.Context, string, string) (*egoscale.InstancePool, error)
 	GetQuota(context.Context, string, string) (*egoscale.Quota, error)
+	ListInstanceTypes(context.Context, string) ([]*egoscale.InstanceType, error)
+	ListSecurityGroups(context.Context, string) ([]*egoscale.SecurityGroup, error)
 	ListSKSClusters(context.Context, string) ([]*egoscale.SKSCluster, error)
 	ScaleInstancePool(context.Context, string, *egoscale.InstancePool, int64) error
 	ScaleSKSNodepool(context.Context, string, *egoscale.SKSCluster, *egoscale.SKSNodepool, int64) error
+	CreateSKSNodepool(context.Context, string, *egoscale.SKSCluster, *egoscale.SKSNodepool) (*egoscale.SKSNodepool, error)
+	DeleteSKSNodepool(context.Context, string, *egoscale.SKSCluster, *egoscale.SKSNodepool) error
 }
 
 const defaultAPIEnvironment = "api"
