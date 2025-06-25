@@ -102,16 +102,35 @@ func (n *sksNodepoolNodeGroup) IncreaseSize(delta int) error {
 	}
 
 	if n.sksNodepool == nil {
-		debugf("Creating SKS Nodepool to scale from 0 to 1 nodes")
-		_, err := n.Create()
+		instanceTypeID, err := n.selectMatchingInstanceType()
 		if err != nil {
 			return err
 		}
-		if delta > 1 {
-			delta--
-		} else {
-			return nil
+
+		securityGroupIDs, err := n.getSecurityGroupIDs()
+		if err != nil {
+			return err
 		}
+
+		clusterId := (*n.sksCluster.Labels)[clusterIdLabelKey]
+
+		debugf("Creating SKS Nodepool to scale from 0 to 1 nodes")
+		n.sksNodepool, err = n.m.client.CreateSKSNodepool(n.m.ctx, n.m.zone, n.sksCluster, &egoscale.SKSNodepool{
+			Description:      ptr("Auto-provisioned Node Pool for customer"),
+			DiskSize:         ptr(int64(20)),
+			InstancePrefix:   ptr("c"),
+			InstanceTypeID:   instanceTypeID,
+			Labels:           ptr(createLabels(n)),
+			Name:             ptr("npc_" + clusterId + "_" + n.machineType + "-" + n.m.zone),
+			SecurityGroupIDs: securityGroupIDs,
+			Size:             ptr(int64(delta)),
+		})
+		if err != nil {
+			return err
+		}
+
+		n.m.nodeGroups = append(n.m.nodeGroups, n)
+		return nil
 	}
 
 	targetSize := *n.sksNodepool.Size + int64(delta)
@@ -210,7 +229,7 @@ func (n *sksNodepoolNodeGroup) DecreaseTargetSize(_ int) error {
 // Id returns an unique identifier of the node group.
 func (n *sksNodepoolNodeGroup) Id() string {
 	if n.sksNodepool == nil {
-		return n.machineType
+		return "customer-" + n.machineType
 	} else {
 		return *n.sksNodepool.InstancePoolID
 	}
@@ -262,8 +281,6 @@ func (n *sksNodepoolNodeGroup) Nodes() ([]cloudprovider.Instance, error) {
 func (n *sksNodepoolNodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
 	mtype := machineTypes[n.machineType]
 
-	scope := (*n.sksCluster.Labels)[scopeLabelKey]
-
 	capacity := apiv1.ResourceList{
 		apiv1.ResourceCPU:    resource.MustParse(mtype.cpu),
 		apiv1.ResourceMemory: resource.MustParse(mtype.memory),
@@ -272,8 +289,8 @@ func (n *sksNodepoolNodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
 
 	node := &apiv1.Node{
 		ObjectMeta: v1.ObjectMeta{
-			Name:   scope + "-" + n.machineType,
-			Labels: createLabels(scope, n.machineType),
+			Name:   n.Scope() + "-" + n.machineType,
+			Labels: createLabels(n),
 		},
 		Status: apiv1.NodeStatus{
 			Capacity:    capacity,
@@ -287,8 +304,9 @@ func (n *sksNodepoolNodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
 	return nodeInfo, nil
 }
 
-func createLabels(scope string, machineType string) map[string]string {
+func createLabels(n *sksNodepoolNodeGroup) map[string]string {
 	var sizeLabelKey string
+	scope := n.Scope()
 	if scope == "flux-platform" {
 		sizeLabelKey = clusterSizeLabelKey
 	} else {
@@ -297,7 +315,7 @@ func createLabels(scope string, machineType string) map[string]string {
 
 	return map[string]string{
 		scopeLabelKey: scope,
-		sizeLabelKey:  machineType,
+		sizeLabelKey:  n.machineType,
 	}
 }
 
@@ -308,41 +326,8 @@ func (n *sksNodepoolNodeGroup) Exist() bool {
 }
 
 // Create creates the node group on the cloud provider side. Implementation optional.
+// The actual creation of the nodepool happens in IncreaseSize when scaling up from 0 nodes
 func (n *sksNodepoolNodeGroup) Create() (cloudprovider.NodeGroup, error) {
-	instanceTypeID, err := n.selectMatchingInstanceType()
-	if err != nil {
-		return nil, err
-	}
-
-	securityGroupIDs, err := n.getSecurityGroupIDs()
-	if err != nil {
-		return nil, err
-	}
-
-	clusterId := (*n.sksCluster.Labels)[clusterIdLabelKey]
-
-	scope := (*n.sksCluster.Labels)[scopeLabelKey]
-	var instancePrefix string
-	if scope == "flux-platform" {
-		instancePrefix = "fp"
-	} else {
-		instancePrefix = "c"
-	}
-
-	_, err = n.m.client.CreateSKSNodepool(n.m.ctx, n.m.zone, n.sksCluster, &egoscale.SKSNodepool{
-		Description:      ptr("Autoprovisioned Node Pool for " + scope),
-		DiskSize:         ptr(int64(20)),
-		InstancePrefix:   &instancePrefix,
-		InstanceTypeID:   instanceTypeID,
-		Labels:           ptr(createLabels(scope, n.machineType)),
-		Name:             ptr("np_" + instancePrefix + "_" + clusterId + "_" + n.machineType + "-" + n.m.zone),
-		SecurityGroupIDs: securityGroupIDs,
-		Size:             ptr(int64(1)),
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	return n, nil
 }
 
@@ -429,4 +414,12 @@ func (n *sksNodepoolNodeGroup) waitUntilRunning(ctx context.Context) error {
 
 		return false, nil
 	})
+}
+
+func (n *sksNodepoolNodeGroup) Scope() string {
+	if n.sksNodepool == nil {
+		return "customer"
+	} else {
+		return (*n.sksNodepool.Labels)[scopeLabelKey]
+	}
 }
