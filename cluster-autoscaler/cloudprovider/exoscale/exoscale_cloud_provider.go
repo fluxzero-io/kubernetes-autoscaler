@@ -18,7 +18,6 @@ package exoscale
 
 import (
 	"fmt"
-
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
@@ -118,21 +117,34 @@ func (e *exoscaleCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovide
 			minSize = nodeGroupSpec.MinSize
 			maxSize = nodeGroupSpec.MaxSize
 		} else {
-			minSize = 1
+			minSize = 0
 			maxSize, err = e.manager.computeInstanceQuota()
 			if err != nil {
 				return nil, err
 			}
 		}
+		debugf("found node %s belonging to SKS Nodepool %s", toNodeID(node.Spec.ProviderID), *sksNodepool.ID)
 
-		nodeGroup = &sksNodepoolNodeGroup{
+		var machineType MachineType
+		for _, machineType = range machineTypes {
+			if machineType.Scope() == (*sksNodepool.Labels)[scopeLabelKey] && machineType.size == (*sksNodepool.Labels)[machineType.SizeLabelKey()] {
+				break
+			}
+		}
+
+		sksNodeGroup := &sksNodepoolNodeGroup{
 			sksNodepool: sksNodepool,
 			sksCluster:  sksCluster,
 			m:           e.manager,
 			minSize:     minSize,
 			maxSize:     maxSize,
+			machineType: machineType,
 		}
-		debugf("found node %s belonging to SKS Nodepool %s", toNodeID(node.Spec.ProviderID), *sksNodepool.ID)
+		nodeGroup = sksNodeGroup
+
+		if sksNodeGroup.machineType.platform {
+			e.manager.platformNodepool = sksNodepool
+		}
 	} else {
 		// Standalone Instance Pool
 		nodeGroup = &instancePoolNodeGroup{
@@ -175,20 +187,42 @@ func (e *exoscaleCloudProvider) Pricing() (cloudprovider.PricingModel, errors.Au
 // GetAvailableMachineTypes get all machine types that can be requested from the cloud provider.
 // Implementation optional.
 func (e *exoscaleCloudProvider) GetAvailableMachineTypes() ([]string, error) {
-	return []string{}, nil
+	keys := make([]string, 0, len(machineTypes))
+	for key := range machineTypes {
+		keys = append(keys, key)
+	}
+	return keys, nil
 }
 
 // NewNodeGroup builds a theoretical node group based on the node definition provided. The node group is not automatically
 // created on the cloud provider side. The node group is not returned by NodeGroups() until it is created.
 // Implementation optional.
 func (e *exoscaleCloudProvider) NewNodeGroup(
-	_ string,
-	_,
+	machineTypeKey string,
+	_ map[string]string,
 	_ map[string]string,
 	_ []apiv1.Taint,
 	_ map[string]resource.Quantity,
 ) (cloudprovider.NodeGroup, error) {
-	return nil, cloudprovider.ErrNotImplemented
+
+	if len(e.manager.nodeGroups) == 0 {
+		return nil, errors.NewAutoscalerError(errors.TransientError, "Unable to get sks cluster from existing node group")
+	}
+	sksNodeGroup, ok := e.manager.nodeGroups[0].(*sksNodepoolNodeGroup)
+	if !ok {
+		return nil, errors.NewAutoscalerError(errors.InternalError, "Node group is of incorrect type")
+	}
+
+	machineType := machineTypes[machineTypeKey]
+	nodeGroup := &sksNodepoolNodeGroup{
+		m:           e.manager,
+		minSize:     0,
+		maxSize:     100,
+		sksCluster:  sksNodeGroup.sksCluster,
+		machineType: machineType,
+	}
+
+	return nodeGroup, nil
 }
 
 // GetResourceLimiter returns struct containing limits (max, min) for resources (cores, memory etc.).
@@ -259,12 +293,13 @@ func (e *exoscaleCloudProvider) instancePoolFromNode(node *apiv1.Node) (*egoscal
 			return nil, errNoInstancePool
 		}
 
-		return nil, fmt.Errorf("unable to retrieve instance ID from Node %q", node.Spec.ProviderID)
+		return nil, fmt.Errorf("unable to retrieve node/instance pool from Node(%s) %q", node.Name, node.Spec.ProviderID)
 	}
 
-	debugf("looking up node group for node ID %s", nodeID)
+	debugf("looking up instancepool for node ID %s", nodeID)
 
 	instance, err := e.manager.client.GetInstance(e.manager.ctx, e.manager.zone, nodeID)
+
 	if err != nil {
 		return nil, err
 	}

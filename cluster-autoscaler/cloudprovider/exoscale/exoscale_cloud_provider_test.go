@@ -117,6 +117,26 @@ func (m *exoscaleClientMock) ScaleSKSNodepool(
 	return args.Error(0)
 }
 
+func (m *exoscaleClientMock) ListInstanceTypes(ctx context.Context, s string) ([]*egoscale.InstanceType, error) {
+	return make([]*egoscale.InstanceType, 0), nil
+}
+
+func (m *exoscaleClientMock) ListSecurityGroups(ctx context.Context, s string) ([]*egoscale.SecurityGroup, error) {
+	return make([]*egoscale.SecurityGroup, 0), nil
+}
+
+func (m *exoscaleClientMock) GetSKSCluster(ctx context.Context, s string, s2 string) (*egoscale.SKSCluster, error) {
+	return &egoscale.SKSCluster{}, nil
+}
+
+func (m *exoscaleClientMock) CreateSKSNodepool(ctx context.Context, s string, cluster *egoscale.SKSCluster, nodepool *egoscale.SKSNodepool) (*egoscale.SKSNodepool, error) {
+	return &egoscale.SKSNodepool{}, nil
+}
+
+func (m *exoscaleClientMock) UpdateSKSNodepool(ctx context.Context, s string, cluster *egoscale.SKSCluster, nodepool *egoscale.SKSNodepool) error {
+	return nil
+}
+
 type cloudProviderTestSuite struct {
 	p *exoscaleCloudProvider
 

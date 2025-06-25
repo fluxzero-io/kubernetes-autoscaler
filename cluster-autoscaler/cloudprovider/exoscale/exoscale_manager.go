@@ -33,9 +33,14 @@ type exoscaleClient interface {
 	GetInstance(context.Context, string, string) (*egoscale.Instance, error)
 	GetInstancePool(context.Context, string, string) (*egoscale.InstancePool, error)
 	GetQuota(context.Context, string, string) (*egoscale.Quota, error)
+	ListInstanceTypes(context.Context, string) ([]*egoscale.InstanceType, error)
+	ListSecurityGroups(context.Context, string) ([]*egoscale.SecurityGroup, error)
 	ListSKSClusters(context.Context, string) ([]*egoscale.SKSCluster, error)
+	GetSKSCluster(context.Context, string, string) (*egoscale.SKSCluster, error)
 	ScaleInstancePool(context.Context, string, *egoscale.InstancePool, int64) error
 	ScaleSKSNodepool(context.Context, string, *egoscale.SKSCluster, *egoscale.SKSNodepool, int64) error
+	CreateSKSNodepool(context.Context, string, *egoscale.SKSCluster, *egoscale.SKSNodepool) (*egoscale.SKSNodepool, error)
+	UpdateSKSNodepool(context.Context, string, *egoscale.SKSCluster, *egoscale.SKSNodepool) error
 }
 
 const defaultAPIEnvironment = "api"
@@ -43,11 +48,12 @@ const defaultAPIEnvironment = "api"
 // Manager handles Exoscale communication and data caching of
 // node groups (Instance Pools).
 type Manager struct {
-	ctx           context.Context
-	client        exoscaleClient
-	zone          string
-	nodeGroups    []cloudprovider.NodeGroup
-	discoveryOpts cloudprovider.NodeGroupDiscoveryOptions
+	ctx              context.Context
+	client           exoscaleClient
+	zone             string
+	nodeGroups       []cloudprovider.NodeGroup
+	discoveryOpts    cloudprovider.NodeGroupDiscoveryOptions
+	platformNodepool *egoscale.SKSNodepool
 }
 
 func newManager(discoveryOpts cloudprovider.NodeGroupDiscoveryOptions) (*Manager, error) {
@@ -112,6 +118,8 @@ func (m *Manager) Refresh() error {
 
 	if len(m.nodeGroups) == 0 {
 		infof("cluster-autoscaler is disabled: no node groups found")
+	} else {
+		debugf("cluster-autoscaler is refreshed with %b node groups", len(nodeGroups))
 	}
 
 	return nil
