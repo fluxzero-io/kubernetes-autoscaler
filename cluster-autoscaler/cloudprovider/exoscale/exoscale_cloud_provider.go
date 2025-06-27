@@ -76,7 +76,7 @@ func (e *exoscaleCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovide
 			sksCluster  *egoscale.SKSCluster
 			sksNodepool *egoscale.SKSNodepool
 		)
-
+		// TODO optimize fetching 1 cluster
 		sksClusters, err := e.manager.client.ListSKSClusters(e.manager.ctx, e.manager.zone)
 		if err != nil {
 			errorf("unable to list SKS clusters: %v", err)
@@ -124,16 +124,30 @@ func (e *exoscaleCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovide
 				return nil, err
 			}
 		}
-
-		nodeGroup = &sksNodepoolNodeGroup{
-			sksNodepool: sksNodepool,
-			sksCluster:  sksCluster,
-			m:           e.manager,
-			minSize:     minSize,
-			maxSize:     maxSize,
-			machineType: (*sksNodepool.Labels)[applicationSizeLabelKey],
-		}
 		debugf("found node %s belonging to SKS Nodepool %s", toNodeID(node.Spec.ProviderID), *sksNodepool.ID)
+
+		platformNodeSizeDiffer := (*sksNodepool.Labels)[scopeLabelKey] == "flux-platform" && (node.Labels[clusterSizeLabelKey] != (*sksNodepool.Labels)[clusterSizeLabelKey])
+		if platformNodeSizeDiffer {
+			debugf("Platform Up/Downgrade detected for node %s %s of clusterSize %s / %s node size %s", (*sksNodepool.Labels)[scopeLabelKey], toNodeID(node.Spec.ProviderID), (*sksNodepool.Labels)[clusterSizeLabelKey], node.Labels[scopeLabelKey], node.Labels[clusterSizeLabelKey])
+			//This will completely ignore the node for CA:	return nil, nil
+		}
+
+		var machineType string
+		if (*sksNodepool.Labels)[scopeLabelKey] == "flux-platform" {
+			machineType = (*sksNodepool.Labels)[clusterSizeLabelKey]
+		} else {
+			machineType = (*sksNodepool.Labels)[applicationSizeLabelKey]
+		}
+		nodeGroup = &sksNodepoolNodeGroup{
+			sksNodepool:            sksNodepool,
+			sksCluster:             sksCluster,
+			m:                      e.manager,
+			minSize:                minSize,
+			maxSize:                maxSize,
+			machineType:            machineType,
+			platformNodeSizeDiffer: platformNodeSizeDiffer,
+		}
+
 	} else {
 		// Standalone Instance Pool
 		nodeGroup = &instancePoolNodeGroup{
@@ -275,12 +289,13 @@ func (e *exoscaleCloudProvider) instancePoolFromNode(node *apiv1.Node) (*egoscal
 			return nil, errNoInstancePool
 		}
 
-		return nil, fmt.Errorf("unable to retrieve instance ID from Node %q", node.Spec.ProviderID)
+		return nil, fmt.Errorf("unable to retrieve node/instance pool from Node(%s) %q", node.Name, node.Spec.ProviderID)
 	}
 
-	debugf("looking up node group for node ID %s", nodeID)
+	debugf("looking up instancepool for node ID %s", nodeID)
 
 	instance, err := e.manager.client.GetInstance(e.manager.ctx, e.manager.zone, nodeID)
+
 	if err != nil {
 		return nil, err
 	}
