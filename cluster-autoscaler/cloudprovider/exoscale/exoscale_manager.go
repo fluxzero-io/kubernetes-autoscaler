@@ -116,6 +116,8 @@ func (m *Manager) Refresh() error {
 
 	if len(m.nodeGroups) == 0 {
 		infof("cluster-autoscaler is disabled: no node groups found")
+	} else {
+		infof("cluster-autoscaler is refreshed with %b node groups", len(nodeGroups))
 	}
 
 	return nil
