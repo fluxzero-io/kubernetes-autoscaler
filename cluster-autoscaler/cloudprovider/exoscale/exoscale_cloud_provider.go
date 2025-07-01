@@ -222,10 +222,6 @@ func (e *exoscaleCloudProvider) NewNodeGroup(
 		machineType: machineType,
 	}
 
-	if machineType.platform {
-		nodeGroup.sksNodepool = e.manager.platformNodepool
-	}
-
 	return nodeGroup, nil
 }
 

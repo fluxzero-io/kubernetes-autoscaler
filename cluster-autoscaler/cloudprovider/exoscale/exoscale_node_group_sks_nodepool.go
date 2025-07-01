@@ -71,10 +71,15 @@ func (n *sksNodepoolNodeGroup) MinSize() int {
 // to Size() once everything stabilizes (new nodes finish startup and registration or
 // removed nodes are deleted completely). Implementation required.
 func (n *sksNodepoolNodeGroup) TargetSize() (int, error) {
-	if n.sksNodepool == nil {
-		return 0, nil
+	if n.machineType.platform {
+		return int(*n.m.platformNodepool.Size), nil
 	}
-	return int(*n.sksNodepool.Size), nil
+
+	if n.sksNodepool != nil {
+		return int(*n.sksNodepool.Size), nil
+	}
+
+	return 0, nil
 }
 
 // IncreaseSize increases the size of the node group. To delete a node you need
@@ -88,7 +93,7 @@ func (n *sksNodepoolNodeGroup) IncreaseSize(delta int) error {
 	var nodepool *egoscale.SKSNodepool
 	if n.machineType.platform {
 		nodepool = n.m.platformNodepool
-		delta += int(*n.m.platformNodepool.Size)
+		delta += int(*nodepool.Size)
 	} else {
 		nodepool = n.sksNodepool
 	}
