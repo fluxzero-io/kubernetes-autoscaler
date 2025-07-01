@@ -40,6 +40,7 @@ type exoscaleClient interface {
 	ScaleInstancePool(context.Context, string, *egoscale.InstancePool, int64) error
 	ScaleSKSNodepool(context.Context, string, *egoscale.SKSCluster, *egoscale.SKSNodepool, int64) error
 	CreateSKSNodepool(context.Context, string, *egoscale.SKSCluster, *egoscale.SKSNodepool) (*egoscale.SKSNodepool, error)
+	UpdateSKSNodepool(context.Context, string, *egoscale.SKSCluster, *egoscale.SKSNodepool) error
 	DeleteSKSNodepool(context.Context, string, *egoscale.SKSCluster, *egoscale.SKSNodepool) error
 }
 
@@ -48,12 +49,12 @@ const defaultAPIEnvironment = "api"
 // Manager handles Exoscale communication and data caching of
 // node groups (Instance Pools).
 type Manager struct {
-	ctx               context.Context
-	client            exoscaleClient
-	zone              string
-	nodeGroups        []cloudprovider.NodeGroup
-	discoveryOpts     cloudprovider.NodeGroupDiscoveryOptions
-	platformNodeGroup *sksNodepoolNodeGroup
+	ctx              context.Context
+	client           exoscaleClient
+	zone             string
+	nodeGroups       []cloudprovider.NodeGroup
+	discoveryOpts    cloudprovider.NodeGroupDiscoveryOptions
+	platformNodepool *egoscale.SKSNodepool
 }
 
 func newManager(discoveryOpts cloudprovider.NodeGroupDiscoveryOptions) (*Manager, error) {

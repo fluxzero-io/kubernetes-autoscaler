@@ -37,33 +37,6 @@ type exoscaleCloudProvider struct {
 	resourceLimiter *cloudprovider.ResourceLimiter
 }
 
-type machineType struct {
-	family       string
-	exoscaleSize string
-	cpu          string
-	memory       string
-	scope        string
-	size         string
-	sizeLabelKey string
-}
-
-var machineTypes = map[string]machineType{
-	"p-tiny":   {"standard", "large", "4", "8Gi", "flux-platform", "tiny", clusterSizeLabelKey},
-	"p-xsmall": {"standard", "large", "4", "8Gi", "flux-platform", "xsmall", clusterSizeLabelKey},
-	"p-small":  {"cpu", "extra-large", "8", "16Gi", "flux-platform", "small", clusterSizeLabelKey},
-	"p-medium": {"cpu", "huge", "16", "32Gi", "flux-platform", "medium", clusterSizeLabelKey},
-	"p-large":  {"cpu", "mega", "32", "64Gi", "flux-platform", "large", clusterSizeLabelKey},
-	"p-xlarge": {"cpu", "mega", "32", "64Gi", "flux-platform", "xlarge", clusterSizeLabelKey},
-	"p-huge":   {"cpu", "mega", "32", "64Gi", "flux-platform", "huge", clusterSizeLabelKey},
-	"c-tiny":   {"standard", "small", "2", "2Gi", "customer", "tiny", applicationSizeLabelKey},
-	"c-xsmall": {"standard", "medium", "2", "4Gi", "customer", "xsmall", applicationSizeLabelKey},
-	"c-small":  {"standard", "large", "4", "8Gi", "customer", "small", applicationSizeLabelKey},
-	"c-medium": {"cpu", "extra-large", "8", "16Gi", "customer", "medium", applicationSizeLabelKey},
-	"c-large":  {"cpu", "huge", "16", "32Gi", "customer", "large", applicationSizeLabelKey},
-	"c-xlarge": {"cpu", "mega", "32", "64Gi", "customer", "xlarge", applicationSizeLabelKey},
-	"c-huge":   {"cpu", "titan", "40", "128Gi", "customer", "huge", applicationSizeLabelKey},
-}
-
 func newExoscaleCloudProvider(manager *Manager, rl *cloudprovider.ResourceLimiter) (*exoscaleCloudProvider, error) {
 	return &exoscaleCloudProvider{
 		manager:         manager,
@@ -152,11 +125,10 @@ func (e *exoscaleCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovide
 		}
 		debugf("found node %s belonging to SKS Nodepool %s", toNodeID(node.Spec.ProviderID), *sksNodepool.ID)
 
-		var machineTypeKey string
-		for key := range machineTypes {
-			machineType := machineTypes[key]
-			if machineType.scope == (*sksNodepool.Labels)[scopeLabelKey] && machineType.size == (*sksNodepool.Labels)[machineType.sizeLabelKey] {
-				machineTypeKey = key
+		var machineType MachineType
+		for _, machineType = range machineTypes {
+			if machineType.Scope() == (*sksNodepool.Labels)[scopeLabelKey] && machineType.size == (*sksNodepool.Labels)[machineType.SizeLabelKey()] {
+				break
 			}
 		}
 
@@ -166,12 +138,12 @@ func (e *exoscaleCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovide
 			m:           e.manager,
 			minSize:     minSize,
 			maxSize:     maxSize,
-			machineType: machineTypeKey,
+			machineType: machineType,
 		}
 		nodeGroup = sksNodeGroup
 
-		if sksNodeGroup.IsPlatform() {
-			e.manager.platformNodeGroup = sksNodeGroup
+		if sksNodeGroup.machineType.platform {
+			e.manager.platformNodepool = sksNodepool
 		}
 	} else {
 		// Standalone Instance Pool
@@ -226,7 +198,7 @@ func (e *exoscaleCloudProvider) GetAvailableMachineTypes() ([]string, error) {
 // created on the cloud provider side. The node group is not returned by NodeGroups() until it is created.
 // Implementation optional.
 func (e *exoscaleCloudProvider) NewNodeGroup(
-	machineType string,
+	machineTypeKey string,
 	_ map[string]string,
 	_ map[string]string,
 	_ []apiv1.Taint,
@@ -241,13 +213,20 @@ func (e *exoscaleCloudProvider) NewNodeGroup(
 		return nil, errors.NewAutoscalerError(errors.InternalError, "Node group is of incorrect type")
 	}
 
-	return &sksNodepoolNodeGroup{
+	machineType := machineTypes[machineTypeKey]
+	nodeGroup := &sksNodepoolNodeGroup{
 		m:           e.manager,
 		minSize:     0,
 		maxSize:     100,
 		sksCluster:  sksNodeGroup.sksCluster,
 		machineType: machineType,
-	}, nil
+	}
+
+	if machineType.platform {
+		nodeGroup.sksNodepool = e.manager.platformNodepool
+	}
+
+	return nodeGroup, nil
 }
 
 // GetResourceLimiter returns struct containing limits (max, min) for resources (cores, memory etc.).
