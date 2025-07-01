@@ -18,7 +18,6 @@ package exoscale
 
 import (
 	"fmt"
-
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
@@ -36,6 +35,33 @@ const exoscaleProviderIDPrefix = "exoscale://"
 type exoscaleCloudProvider struct {
 	manager         *Manager
 	resourceLimiter *cloudprovider.ResourceLimiter
+}
+
+type machineType struct {
+	family       string
+	exoscaleSize string
+	cpu          string
+	memory       string
+	scope        string
+	size         string
+	sizeLabelKey string
+}
+
+var machineTypes = map[string]machineType{
+	"p-tiny":   {"standard", "large", "4", "8Gi", "flux-platform", "tiny", clusterSizeLabelKey},
+	"p-xsmall": {"standard", "large", "4", "8Gi", "flux-platform", "xsmall", clusterSizeLabelKey},
+	"p-small":  {"cpu", "extra-large", "8", "16Gi", "flux-platform", "small", clusterSizeLabelKey},
+	"p-medium": {"cpu", "huge", "16", "32Gi", "flux-platform", "medium", clusterSizeLabelKey},
+	"p-large":  {"cpu", "mega", "32", "64Gi", "flux-platform", "large", clusterSizeLabelKey},
+	"p-xlarge": {"cpu", "mega", "32", "64Gi", "flux-platform", "xlarge", clusterSizeLabelKey},
+	"p-huge":   {"cpu", "mega", "32", "64Gi", "flux-platform", "huge", clusterSizeLabelKey},
+	"c-tiny":   {"standard", "small", "2", "2Gi", "customer", "tiny", applicationSizeLabelKey},
+	"c-xsmall": {"standard", "medium", "2", "4Gi", "customer", "xsmall", applicationSizeLabelKey},
+	"c-small":  {"standard", "large", "4", "8Gi", "customer", "small", applicationSizeLabelKey},
+	"c-medium": {"cpu", "extra-large", "8", "16Gi", "customer", "medium", applicationSizeLabelKey},
+	"c-large":  {"cpu", "huge", "16", "32Gi", "customer", "large", applicationSizeLabelKey},
+	"c-xlarge": {"cpu", "mega", "32", "64Gi", "customer", "xlarge", applicationSizeLabelKey},
+	"c-huge":   {"cpu", "titan", "40", "128Gi", "customer", "huge", applicationSizeLabelKey},
 }
 
 func newExoscaleCloudProvider(manager *Manager, rl *cloudprovider.ResourceLimiter) (*exoscaleCloudProvider, error) {
@@ -126,28 +152,27 @@ func (e *exoscaleCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovide
 		}
 		debugf("found node %s belonging to SKS Nodepool %s", toNodeID(node.Spec.ProviderID), *sksNodepool.ID)
 
-		platformNodeSizeDiffer := (*sksNodepool.Labels)[scopeLabelKey] == "flux-platform" && (node.Labels[clusterSizeLabelKey] != (*sksNodepool.Labels)[clusterSizeLabelKey])
-		if platformNodeSizeDiffer {
-			debugf("Platform Up/Downgrade detected for node %s %s of clusterSize %s / %s node size %s", (*sksNodepool.Labels)[scopeLabelKey], toNodeID(node.Spec.ProviderID), (*sksNodepool.Labels)[clusterSizeLabelKey], node.Labels[scopeLabelKey], node.Labels[clusterSizeLabelKey])
-			//This will completely ignore the node for CA:	return nil, nil
+		var machineTypeKey string
+		for key := range machineTypes {
+			machineType := machineTypes[key]
+			if machineType.scope == (*sksNodepool.Labels)[scopeLabelKey] && machineType.size == (*sksNodepool.Labels)[machineType.sizeLabelKey] {
+				machineTypeKey = key
+			}
 		}
 
-		var machineType string
-		if (*sksNodepool.Labels)[scopeLabelKey] == "flux-platform" {
-			machineType = (*sksNodepool.Labels)[clusterSizeLabelKey]
-		} else {
-			machineType = (*sksNodepool.Labels)[applicationSizeLabelKey]
+		sksNodeGroup := &sksNodepoolNodeGroup{
+			sksNodepool: sksNodepool,
+			sksCluster:  sksCluster,
+			m:           e.manager,
+			minSize:     minSize,
+			maxSize:     maxSize,
+			machineType: machineTypeKey,
 		}
-		nodeGroup = &sksNodepoolNodeGroup{
-			sksNodepool:            sksNodepool,
-			sksCluster:             sksCluster,
-			m:                      e.manager,
-			minSize:                minSize,
-			maxSize:                maxSize,
-			machineType:            machineType,
-			platformNodeSizeDiffer: platformNodeSizeDiffer,
-		}
+		nodeGroup = sksNodeGroup
 
+		if sksNodeGroup.IsPlatform() {
+			e.manager.platformNodeGroup = sksNodeGroup
+		}
 	} else {
 		// Standalone Instance Pool
 		nodeGroup = &instancePoolNodeGroup{
@@ -190,7 +215,11 @@ func (e *exoscaleCloudProvider) Pricing() (cloudprovider.PricingModel, errors.Au
 // GetAvailableMachineTypes get all machine types that can be requested from the cloud provider.
 // Implementation optional.
 func (e *exoscaleCloudProvider) GetAvailableMachineTypes() ([]string, error) {
-	return []string{"tiny", "xsmall", "small", "medium", "large", "xlarge", "huge"}, nil
+	keys := make([]string, 0, len(machineTypes))
+	for key := range machineTypes {
+		keys = append(keys, key)
+	}
+	return keys, nil
 }
 
 // NewNodeGroup builds a theoretical node group based on the node definition provided. The node group is not automatically

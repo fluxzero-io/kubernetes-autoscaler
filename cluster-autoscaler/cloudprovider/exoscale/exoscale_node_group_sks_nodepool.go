@@ -32,13 +32,6 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 )
 
-type machineType struct {
-	family string
-	size   string
-	cpu    string
-	memory string
-}
-
 const (
 	scaleToZeroSupported = true
 
@@ -47,17 +40,6 @@ const (
 	clusterIdLabelKey       = "flux.host.cluster.id"
 	scopeLabelKey           = "flux.host.node.scope"
 )
-
-var machineTypes = map[string]machineType{
-	"tiny":   {"standard", "small", "2", "2Gi"},
-	"xsmall": {"standard", "medium", "2", "4Gi"},
-	"small":  {"standard", "large", "4", "8Gi"},
-	"medium": {"cpu", "extra-large", "8", "16Gi"},
-	"large":  {"cpu", "huge", "16", "32Gi"},
-	"xlarge": {"cpu", "mega", "32", "64Gi"},
-	"huge":   {"cpu", "titan", "40", "128Gi"},
-	//"p-medium": {"cpu", "huge", "16", "32Gi"},
-}
 
 // sksNodepoolNodeGroup implements cloudprovider.NodeGroup interface for Exoscale SKS Nodepools.
 type sksNodepoolNodeGroup struct {
@@ -71,8 +53,7 @@ type sksNodepoolNodeGroup struct {
 	minSize int
 	maxSize int
 
-	machineType            string
-	platformNodeSizeDiffer bool
+	machineType string
 }
 
 // MaxSize returns maximum size of the node group.
@@ -104,21 +85,28 @@ func (n *sksNodepoolNodeGroup) IncreaseSize(delta int) error {
 		return fmt.Errorf("delta must be positive, have: %d", delta)
 	}
 
+	var nodepool *egoscale.SKSNodepool
+	if n.IsPlatform() {
+		nodepool = n.m.platformNodeGroup.sksNodepool
+		delta += int(*n.m.platformNodeGroup.sksNodepool.Size)
+	} else {
+		nodepool = n.sksNodepool
+	}
+
 	currentSize, targetSize := calculateTargetSize(n, delta)
 	if targetSize > int64(n.MaxSize()) {
 		return fmt.Errorf("size increase is too large (current: %d desired: %d max: %d)",
 			currentSize, targetSize, n.MaxSize())
 	}
 
-	if created, err := n.createNodePoolWhenNotExist(targetSize); err != nil || created {
+	if created, err := n.createNodepoolWhenNeeded(targetSize); err != nil || created {
 		return err
 	}
 
-	infof("scaling SKS Nodepool %s to size %d", *n.sksNodepool.ID, targetSize)
-	infof("scaling SKS Nodepool %s flux-platform node size differ: %b", *n.sksNodepool.ID, n.platformNodeSizeDiffer)
+	infof("scaling SKS Nodepool %s to size %d", *nodepool.ID, targetSize)
 
-	if err := n.m.client.ScaleSKSNodepool(n.m.ctx, n.m.zone, n.sksCluster, n.sksNodepool, targetSize); err != nil {
-		errorf("unable to scale SKS Nodepool %s: %v", *n.sksNodepool.ID, err)
+	if err := n.m.client.ScaleSKSNodepool(n.m.ctx, n.m.zone, n.sksCluster, nodepool, targetSize); err != nil {
+		errorf("unable to scale SKS Nodepool %s: %v", *nodepool.ID, err)
 		return err
 	}
 
@@ -126,14 +114,14 @@ func (n *sksNodepoolNodeGroup) IncreaseSize(delta int) error {
 		return err
 	}
 
-	n.sksNodepool.Size = &targetSize
+	nodepool.Size = &targetSize
 
 	return nil
 }
 
-func (n *sksNodepoolNodeGroup) createNodePoolWhenNotExist(targetSize int64) (bool, error) {
+func (n *sksNodepoolNodeGroup) createNodepoolWhenNeeded(targetSize int64) (bool, error) {
 	shouldCreate := false
-	if n.sksNodepool == nil {
+	if !n.IsPlatform() && n.sksNodepool == nil {
 		shouldCreate = true
 		instanceTypeID, err := n.selectMatchingInstanceType()
 		if err != nil {
@@ -147,13 +135,15 @@ func (n *sksNodepoolNodeGroup) createNodePoolWhenNotExist(targetSize int64) (boo
 
 		fluxClusterId := (*n.sksCluster.Labels)[clusterIdLabelKey]
 
+		mtype := machineTypes[n.machineType]
+
 		debugf("Creating SKS Nodepool %s to scale from 0 to %d nodes", n.machineType, targetSize)
 		n.sksNodepool, err = n.m.client.CreateSKSNodepool(n.m.ctx, n.m.zone, n.sksCluster, &egoscale.SKSNodepool{
 			Description:      ptr("Auto-provisioned Node Pool for customer"),
 			DiskSize:         ptr(int64(20)),
 			InstancePrefix:   ptr("c"),
 			InstanceTypeID:   instanceTypeID,
-			Labels:           ptr(createLabels(n, "")),
+			Labels:           ptr(createLabels(mtype, "")),
 			Name:             ptr("npc_" + fluxClusterId + "_" + n.machineType + "-" + n.m.zone),
 			SecurityGroupIDs: securityGroupIDs,
 			Size:             ptr(targetSize),
@@ -248,7 +238,7 @@ func (n *sksNodepoolNodeGroup) DecreaseTargetSize(_ int) error {
 // Id returns an unique identifier of the node group.
 func (n *sksNodepoolNodeGroup) Id() string {
 	if n.sksNodepool == nil {
-		return "customer-" + n.machineType
+		return n.machineType
 	} else {
 		return *n.sksNodepool.InstancePoolID
 	}
@@ -300,22 +290,16 @@ func (n *sksNodepoolNodeGroup) Nodes() ([]cloudprovider.Instance, error) {
 func (n *sksNodepoolNodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
 	mtype := machineTypes[n.machineType]
 
-	debugf("TemplateNodeInfo: mtype %s, for nodepoolnodegroup, platform-nodesize-differ %s", mtype, n.platformNodeSizeDiffer)
-
 	capacity := apiv1.ResourceList{
 		apiv1.ResourceCPU:    resource.MustParse(mtype.cpu),
 		apiv1.ResourceMemory: resource.MustParse(mtype.memory),
 		apiv1.ResourcePods:   resource.MustParse("110"),
 	}
-	nodePrefix := n.machineType
-	if n.sksNodepool != nil && n.sksNodepool.InstancePrefix != nil {
-		nodePrefix = *n.sksNodepool.InstancePrefix
-	}
-	nodeName := fmt.Sprintf("%s-%d", nodePrefix, rand.Int63())
+	nodeName := fmt.Sprintf("%s-%d", n.machineType, rand.Int63())
 	node := &apiv1.Node{
 		ObjectMeta: v1.ObjectMeta{
-			Name:   n.Scope() + "-" + n.machineType, //todo fix for platform
-			Labels: createLabels(n, nodeName),
+			Name:   n.machineType,
+			Labels: createLabels(mtype, nodeName),
 		},
 		Status: apiv1.NodeStatus{
 			Capacity:    capacity,
@@ -329,18 +313,10 @@ func (n *sksNodepoolNodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
 	return nodeInfo, nil
 }
 
-func createLabels(n *sksNodepoolNodeGroup, nodeName string) map[string]string {
-	var sizeLabelKey string
-	scope := n.Scope()
-	if scope == "flux-platform" {
-		sizeLabelKey = clusterSizeLabelKey
-	} else {
-		sizeLabelKey = applicationSizeLabelKey
-	}
-
+func createLabels(mtype machineType, nodeName string) map[string]string {
 	result := map[string]string{
-		scopeLabelKey: scope,
-		sizeLabelKey:  n.machineType,
+		scopeLabelKey:      mtype.scope,
+		mtype.sizeLabelKey: mtype.size,
 	}
 
 	if nodeName != "" {
@@ -373,7 +349,7 @@ func (n *sksNodepoolNodeGroup) selectMatchingInstanceType() (*string, error) {
 
 	for _, instanceType := range instanceTypes {
 		machineType := machineTypes[n.machineType]
-		if machineType.family == *instanceType.Family && machineType.size == *instanceType.Size {
+		if machineType.family == *instanceType.Family && machineType.exoscaleSize == *instanceType.Size {
 			return instanceType.ID, nil
 		}
 	}
@@ -449,10 +425,6 @@ func (n *sksNodepoolNodeGroup) waitUntilRunning(ctx context.Context) error {
 	})
 }
 
-func (n *sksNodepoolNodeGroup) Scope() string {
-	if n.sksNodepool == nil {
-		return "customer"
-	} else {
-		return (*n.sksNodepool.Labels)[scopeLabelKey]
-	}
+func (n *sksNodepoolNodeGroup) IsPlatform() bool {
+	return machineTypes[n.machineType].scope == "flux-platform"
 }
