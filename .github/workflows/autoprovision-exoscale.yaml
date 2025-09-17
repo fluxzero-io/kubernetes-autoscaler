@@ -27,18 +27,18 @@ jobs:
         id: docker-meta
         uses: docker/metadata-action@v5
         with:
-          images: registry.flux.host/cluster-autoscaler
+          images: registry.fluxzero.io/cluster-autoscaler
 
-      - name: Generate Flux Host JWT
+      - name: Generate Fluxzero Cloud JWT
         id: jwt
-        uses: ./.github/actions/generate-jwt
+        uses: fluxzero-io/fluxzero-jwt-action@v1
         with:
           api-key: ${{ secrets.FLUX_HOST_API_KEY }}
 
-      - name: Log in to Flux Host Container Registry
+      - name: Log in to Fluxzero Cloud Container Registry
         uses: docker/login-action@v3
         with:
-          registry: registry.flux.host
+          registry: registry.fluxzero.io
           username: ${{ steps.jwt.outputs.userId }}
           password: ${{ steps.jwt.outputs.token }}
 
